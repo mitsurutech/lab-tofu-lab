@@ -1,0 +1,367 @@
+# Infrastructure as code with OpenTofu: plan, apply and state, with the built-in resource only
+# OpenTofu is installed by the setup below, from its GitHub release, the first time it starts.
+cpus: 1
+memory: 1024    # MB
+disk: 10        # GB
+
+# Nothing opens in the browser: the lab is the terminal.
+open: []
+
+# Run once, as root. Its output is kept in /var/log/mitsurutech-setup.log on the VM.
+setup: |
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq --no-install-recommends ca-certificates curl jq
+  mkdir -p /usr/share/tofulab/hello /usr/share/tofulab/campus /usr/share/tofulab/fix
+  cat > /usr/local/bin/tofulab <<'TOFULAB_TOOL_END'
+  #!/bin/bash
+  # tofulab: install OpenTofu, or put the lab's files back.
+  #   sudo tofulab install | reset [hello|campus|fix]
+  [ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
+  VERSION=1.13.2
+  SHA_AMD64=4ac1080e445fe4e6af87895be485390de256e3657add0fdaca18e2c286424396
+  SHA_ARM64=5c32e7f1cbe265a1ed4b47de21701fa60cedcdba7306d32758683e2505253e86
+  home=/home/student
+  [ -d $home ] || home=/root
+  LAB=$home/tofu-lab
+
+  install() {
+    if command -v tofu >/dev/null 2>&1 && tofu version | head -n 1 | grep -q "v$VERSION"; then
+      echo "tofulab: OpenTofu $VERSION is installed"; return 0
+    fi
+    # A VM's only way out is a proxy, named in /etc/environment for every session.
+    if [ -z "$https_proxy" ] && [ -r /etc/environment ]; then set -a; . /etc/environment; set +a; fi
+    arch=$(dpkg --print-architecture)
+    case $arch in
+      amd64) sha=$SHA_AMD64 ;;
+      arm64) sha=$SHA_ARM64 ;;
+      *) echo "tofulab: no OpenTofu package is pinned for $arch"; exit 1 ;;
+    esac
+    deb=tofu_"$VERSION"_"$arch".deb
+    url=https://github.com/opentofu/opentofu/releases/download/v"$VERSION"/"$deb"
+    tmp=$(mktemp -d)
+    echo "tofulab: downloading $url"
+    if ! curl -fsSL --retry 2 --connect-timeout 20 --max-time 300 -o "$tmp/$deb" "$url"; then
+      rm -rf "$tmp"
+      echo "tofulab: the download failed. This machine reaches only Ubuntu's archive, PyPI, npm and"
+      echo "tofulab: GitHub, and GitHub only with a free account: a visitor's VM cannot install it."
+      exit 1
+    fi
+    if ! echo "$sha  $tmp/$deb" | sha256sum -c --quiet - ; then
+      rm -rf "$tmp"
+      echo "tofulab: the file downloaded is not the one this lab pins (SHA-256 differs), not installed"
+      exit 1
+    fi
+    dpkg -i "$tmp/$deb" >/dev/null 2>&1 || { rm -rf "$tmp"; echo "tofulab: dpkg could not install $deb"; exit 1; }
+    rm -rf "$tmp"
+    echo "tofulab: installed $(tofu version | head -n 1)"
+  }
+
+  reset() {
+    what="$1"
+    [ -n "$what" ] || what=all
+    case $what in hello|campus|fix|all) ;; *) echo "tofulab: no folder $what (hello, campus or fix)"; exit 1 ;; esac
+    for d in hello campus fix; do
+      [ "$what" = all ] || [ "$what" = $d ] || continue
+      mkdir -p $LAB/$d
+      rm -rf $LAB/$d/.terraform $LAB/$d/.terraform.lock.hcl $LAB/$d/terraform.tfstate $LAB/$d/terraform.tfstate.backup
+      rm -f $LAB/$d/*.tf
+      cp /usr/share/tofulab/$d/*.tf $LAB/$d/
+      chown -R student:student $LAB/$d 2>/dev/null
+      echo "tofulab: $LAB/$d is as it was given"
+    done
+  }
+
+  case "$1" in
+    install) install ;;
+    reset) reset "$2" ;;
+    *) sed -n '2,3p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  esac
+  TOFULAB_TOOL_END
+  chmod 755 /usr/local/bin/tofulab
+  cat > /usr/share/tofulab/hello/main.tf <<'TOFULAB_HELLO_END'
+  # The smallest OpenTofu project: one resource and one output.
+  # In this folder run, one after another: tofu init, tofu plan, tofu apply
+  resource "terraform_data" "hello" {
+    input = "hello"
+  }
+
+  output "greeting" {
+    value = terraform_data.hello.output
+  }
+  TOFULAB_HELLO_END
+  cat > /usr/share/tofulab/campus/variables.tf <<'TOFULAB_VARIABLES_END'
+  # Your project, part 1: the variables. The README says which ones and what they are for.
+  TOFULAB_VARIABLES_END
+  cat > /usr/share/tofulab/campus/main.tf <<'TOFULAB_MAIN_END'
+  # Your project, part 2: the resources. The README says which ones.
+  TOFULAB_MAIN_END
+  cat > /usr/share/tofulab/campus/outputs.tf <<'TOFULAB_OUTPUTS_END'
+  # Your project, part 3: the outputs. The README says which ones.
+  TOFULAB_OUTPUTS_END
+  cat > /usr/share/tofulab/fix/main.tf <<'TOFULAB_FIX_END'
+  # Three things are wrong in this folder. Find them with: tofu validate
+  # It reports what it finds one kind at a time, so fix one and run it again.
+  variable "pods" {
+    type    = number
+    default = "three"
+  }
+
+  resource "terraform_data" "front" {
+    input = terraform_data.back.output
+  }
+
+  resource "terraform_data" "back" {
+    input = terraform_data.front.output
+  }
+
+  resource "terraform_data" "label" {
+    input = var.colour
+  }
+
+  output "report" {
+    value = format("%d pods, label %s", var.pods, terraform_data.label.output)
+  }
+  TOFULAB_FIX_END
+  home=/home/student
+  [ -d $home ] || home=/root
+  mkdir -p $home/tofu-lab
+  for d in hello campus fix; do
+    [ -d $home/tofu-lab/$d ] || cp -r /usr/share/tofulab/$d $home/tofu-lab/$d
+  done
+  cat > $home/README.md <<'TOFULAB_README_END'
+  # Lab: infrastructure as code with OpenTofu
+
+  Infrastructure as code means you describe what should exist in files, and a tool works out how
+  to get there. OpenTofu reads your files, compares them with what it has recorded as already
+  existing (the state), shows you the difference (the plan), and only then changes things (apply).
+  OpenTofu is open source (MPL-2.0), the community fork of Terraform.
+
+  ## What is real here, and what is not
+
+  Real clouds and services are reached through providers, plug-ins that OpenTofu downloads from a
+  registry. This VM can only reach Ubuntu's package archive, PyPI, npm and GitHub, so no provider
+  can be downloaded and you will never create a server here. Everything else is the real thing.
+  One resource is built into OpenTofu and needs no download: terraform_data. It only stores a
+  value you give it, in its input, and hands it back as its output. The rest is exactly what you
+  would use against a cloud: variables, outputs, count, for_each, dependencies, plan, apply, state.
+  Only the last step differs. With a provider, a resource block would be something like (shown to
+  read, never run here):
+
+      resource "aws_instance" "web" {
+        ami           = "ami-0123456789"
+        instance_type = "t3.micro"
+      }
+
+  and apply would ask a cloud to make a machine. Here it stores a value instead.
+
+  ## The folders, in ~/tofu-lab
+
+      hello/    works as given: the first plan and apply, then a variable, then the state
+      campus/   your project, to be written from nothing to the list in part 3
+      fix/      a project with three mistakes in it, for part 6
+
+  ## Part 1: your first plan and apply (hello)
+
+  1. cd ~/tofu-lab/hello and read main.tf: one resource, one output.
+  2. tofu init prepares the folder (there is no provider to fetch). Then tofu plan: it prints
+     what it would do, with + for create, ~ for change, - for destroy. Read the last line.
+  3. tofu apply, type yes. Then ls: a file called terraform.tfstate has appeared. Run tofu plan
+     again. What does it say now, and why?
+
+  ## Part 2: variables and outputs (hello)
+
+  1. Add a variable called name to main.tf: variable "name" with a type of string and a default.
+     Make the resource's input say hello and then the name. Strings are joined with the
+     function format("hello %s", something) or join(" ", [a, b]). tofu console lets you try a
+     function: type format("%s-%d", "a", 3) and press Enter, then Ctrl-D to leave.
+  2. Run tofu plan. Is it a change or a replacement, and why? Then tofu apply -var name=Ada.
+     tofu output greeting prints the output.
+
+  ## Part 3: several of a thing, in your own project (campus)
+
+  Work in ~/tofu-lab/campus. Three files are given with a comment in each: variables.tf, main.tf
+  and outputs.tf. OpenTofu reads every .tf file in the folder, so what goes where is yours to
+  keep tidy. Write it so that:
+
+  - There are three variables, each with a type and a default: site, a string, whose default is
+    the name of a school or college; servers, a set of strings, whose default has three names in
+    it; and rooms, a number, whose default is 3.
+  - There is one terraform_data resource named server for each name in servers, made with
+    for_each, where each one's input is the site name, a hyphen and the server's name:
+    Riverside College-web. Inside such a block each.key is the name.
+  - There are as many terraform_data resources named room as the number rooms says, made with
+    count, where room number 1 has the input Riverside College room 1, then room 2, and so on.
+    Inside such a block count.index starts at 0.
+  - There is a terraform_data resource named summary whose input is a sentence of the form
+    Riverside College: 3 servers and 3 rooms, worked out from the variables and from how many
+    servers and rooms there are, and which reads the servers and the rooms, so it waits for both.
+    (length counts the instances of a resource.)
+  - There are two outputs. summary is the summary resource's output. server_names is the list of
+    the servers' names, found from the servers resource itself: the function keys gives the names
+    of a resource made with for_each, and sort puts them in order.
+  - tofu fmt leaves every file as it is: run tofu fmt to tidy them.
+
+  Run tofu plan after each step: it is quicker to see what you have than to guess.
+
+  ## Part 4: read a plan after a change (campus)
+
+  Apply your project, then change the default of servers: take the middle name out and add two
+  new ones. Before you run tofu apply, run tofu plan and answer, from what it prints: which
+  resources will be destroyed, which created, which left alone, and which changed in place. Then
+  check yourself with tofu apply. Why was the room not touched?
+
+  ## Part 5: the state (hello)
+
+  1. In ~/tofu-lab/hello, tofu state list shows what OpenTofu has recorded, and
+     tofu state show terraform_data.hello shows one resource. The state is a file you can read:
+     cat terraform.tfstate.
+  2. Delete terraform.tfstate with rm and run tofu plan. OpenTofu has forgotten it made the
+     resource, so it plans to create it again. That is why the state matters, and why in real
+     work it is kept safe and never edited by hand.
+
+  ## Part 6: fix the project (fix)
+
+  ~/tofu-lab/fix has three mistakes, none of them a typing slip: a value of the wrong type, a
+  variable that does not exist, and two resources that wait for each other for ever. Use tofu
+  validate to find them one at a time and fix each one. When you are done, tofu apply must work,
+  the three resources and the output must still be there, and the output must follow the
+  variable pods: tofu apply -var pods=7 must report 7 pods.
+
+  ## The tools
+
+  - tofu fmt                      tidy the files in this folder
+  - tofu validate                 check the files make sense, before any plan
+  - tofu plan                     show what apply would do
+  - tofu apply                    do it, after asking
+  - tofu destroy                  remove everything the state records
+  - tofu state list               what is recorded
+  - tofu console                  try an expression or a function
+  - tofu graph                    the dependencies, as a graph
+  - sudo tofulab reset campus     put a folder's files back as they were given
+  - sudo tofulab install          install OpenTofu again, if the first download failed
+
+  Your teacher's check copies your campus and fix folders to a new place, so your own state does
+  not count, then plans and applies campus with values of its own for the variables, checks what
+  was made and what the outputs say, changes the servers and checks exactly what the plan does,
+  and checks that nothing is left to change after apply.
+  TOFULAB_README_END
+  chown -R student:student $home/tofu-lab $home/README.md 2>/dev/null
+  echo "Read README.md in your home folder first." > /etc/motd
+  tofulab install || echo "OpenTofu is not installed yet: run sudo tofulab install" >> /etc/motd
+
+# Marks a handed-in VM, KAN-29: run as root on a copy of the saved disk after a fresh boot, so
+# it sees only what was saved. Its exit status is the result: 0 passes.
+check: |
+  fail() {
+    echo "NOT PASSED: $*"
+    exit 1
+  }
+  # The first few lines of an error from tofu, without the box drawn round it.
+  why() { grep -E 'Error|^│' | sed 's/│//' | grep -v '^ *$' | tr -s ' ' | head -n 5 | tr '\n' ' ' | cut -c1-300; }
+  home=/home/student
+  [ -d $home ] || home=/root
+  lab=$home/tofu-lab
+  command -v tofu >/dev/null 2>&1 || fail "OpenTofu is not installed on this machine (sudo tofulab install; it needs a VM with a free account, which can reach GitHub)"
+  command -v jq >/dev/null 2>&1 || fail "jq is missing from this machine"
+  export TF_IN_AUTOMATION=1 TF_INPUT=0 CHECKPOINT_DISABLE=1
+  work=$(mktemp -d)
+  trap 'rm -rf $work' EXIT
+  # Only the .tf files are looked at, in a new place: the student's own state and plugins do not count.
+  for d in campus fix; do
+    [ -d $lab/$d ] || fail "there is no $lab/$d folder (sudo tofulab reset puts it back)"
+    mkdir $work/$d
+    cp $lab/$d/*.tf $work/$d/ 2>/dev/null || fail "$lab/$d has no .tf files"
+    if grep -qE '^[[:space:]]*(provisioner|provider)[[:space:]"]|required_providers|local-exec|remote-exec' $work/$d/*.tf; then
+      fail "$d uses a provider or a provisioner: this lab has only the built-in terraform_data resource, which needs neither"
+    fi
+  done
+  # One folder: tofu init, tofu validate and tofu fmt -check, in the copy.
+  prepare() {
+    d=$1
+    cd $work/$d
+    out=$(tofu init -no-color 2>&1) || fail "tofu init fails in $d: $(echo "$out" | why)"
+    tofu validate -json -no-color > $work/validate.json 2>&1
+    jq -e '.valid == true' $work/validate.json >/dev/null 2>&1 || fail "tofu validate fails in $d: $(jq -r '[.diagnostics[]? | select(.severity == "error") | .summary + ": " + (.detail // "")] | first // "unknown"' $work/validate.json 2>/dev/null | cut -c1-300)"
+    out=$(tofu fmt -check -diff -no-color 2>&1) || fail "the files in $d are not tidy: run tofu fmt in it ($(echo "$out" | grep -m1 -E '^[a-z_]+\.tf|^---' | tr '\n' ' '))"
+  }
+
+  # Run a tofu command with the variables this check has chosen.
+  go() { sub=$1; shift; tofu $sub -no-color -input=false -var "site=$site" -var "servers=$servers" -var "rooms=$rooms" "$@" 2>&1; }
+
+  prepare campus
+  # With no value given, every variable must already have its default, and something must be made.
+  out=$(tofu plan -no-color -detailed-exitcode 2>&1); code=$?
+  if [ $code = 1 ]; then
+    case "$out" in *"No value for required variable"*) fail "tofu plan fails in campus with no value given for the variables, so each needs a default: $(echo "$out" | why)" ;; esac
+    fail "tofu plan fails in campus: $(echo "$out" | why)"
+  fi
+  [ $code = 0 ] && fail "campus makes nothing yet: it needs its variables, its resources and its outputs"
+
+  # The check's own values: a site name nobody has seen, four servers, two rooms.
+  site="Check $RANDOM"
+  servers='["alpha","beta","gamma"]'
+  rooms=2
+  out=$(go plan -out=$work/plan-a) || fail "tofu plan fails in campus when the variables site, servers and rooms are given values: $(echo "$out" | why)"
+  tofu show -json $work/plan-a > $work/plan-a.json 2>/dev/null
+  jq -e '.output_changes.summary' $work/plan-a.json >/dev/null 2>&1 || fail "campus has no output named summary"
+  jq -e '.output_changes.server_names' $work/plan-a.json >/dev/null 2>&1 || fail "campus has no output named server_names"
+  jq -e '.output_changes.summary.after_unknown == true' $work/plan-a.json >/dev/null 2>&1 || fail "the output summary does not read a resource: its value must come from the summary resource, not be worked out or typed in beside it"
+  refs=$(jq -r '[.configuration.root_module.resources[]? | select(.name == "summary") | ((.depends_on // [])[], (.expressions[]? | .references? // [] | .[]))] | join(" ")' $work/plan-a.json 2>/dev/null)
+  case "$refs" in *terraform_data.server*) ;; *) fail "the summary resource does not read the servers, so it would not wait for them" ;; esac
+  case "$refs" in *terraform_data.room*) ;; *) fail "the summary resource does not read the rooms, so it would not wait for them" ;; esac
+
+  # What the state must hold for the variables as they now are.
+  made_right() {
+    tofu show -json -no-color > $work/state.json 2>/dev/null
+    got=$(jq -c '[.values.root_module.resources[]? | select(.name == "server") | {a: .address, i: .values.input}] | sort' $work/state.json 2>/dev/null)
+    want=$(jq -nc --arg s "$site" --argjson l "$servers" '$l | map({a: ("terraform_data.server[\"" + . + "\"]"), i: ($s + "-" + .)}) | sort')
+    [ "$got" = "$want" ] || fail "the servers are not right: one terraform_data.server for each name in servers, each with the site, a hyphen and the name as its input. Expected $want and found $(echo "$got" | cut -c1-300)"
+    got=$(jq -c '[.values.root_module.resources[]? | select(.name == "room") | {a: .address, i: .values.input}] | sort' $work/state.json 2>/dev/null)
+    want=$(jq -nc --arg s "$site" --argjson n "$rooms" '[range(0; $n)] | map({a: ("terraform_data.room[" + tostring + "]"), i: ($s + " room " + ((. + 1) | tostring))}) | sort')
+    [ "$got" = "$want" ] || fail "the rooms are not right: one terraform_data.room for each number up to rooms, made with count, each with the site and its number. Expected $want and found $(echo "$got" | cut -c1-300)"
+    got=$(jq -r '.values.outputs.summary.value' $work/state.json 2>/dev/null)
+    want="$site: $(echo "$servers" | jq 'length') servers and $rooms rooms"
+    [ "$got" = "$want" ] || fail "the output summary is not right: expected $want and found $got"
+    got=$(jq -c '.values.outputs.server_names.value | sort' $work/state.json 2>/dev/null)
+    want=$(echo "$servers" | jq -c 'sort')
+    [ "$got" = "$want" ] || fail "the output server_names is not right: expected the names in servers, $want, and found $got"
+  }
+  out=$(go apply -auto-approve) || fail "tofu apply fails in campus: $(echo "$out" | why)"
+  made_right
+
+  # Take beta out and add two: only beta may go and only the two may come.
+  servers='["alpha","gamma","delta","epsilon"]'
+  out=$(go plan -detailed-exitcode -out=$work/plan-b); code=$?
+  [ $code = 2 ] || fail "changing servers should show a change in the plan, and it did not (exit status $code)"
+  tofu show -json $work/plan-b > $work/plan-b.json 2>/dev/null
+  act() { jq -r --arg a "$1" '[.resource_changes[]? | select(.address == $a) | .change.actions | join("+")] | first // "none"' $work/plan-b.json; }
+  [ "$(act 'terraform_data.server["beta"]')" = delete ] || fail "removing beta from servers must destroy terraform_data.server[\"beta\"]; the plan says $(act 'terraform_data.server["beta"]')"
+  for n in delta epsilon; do
+    [ "$(act "terraform_data.server[\"$n\"]")" = create ] || fail "adding $n to servers must create terraform_data.server[\"$n\"]; the plan says $(act "terraform_data.server[\"$n\"]")"
+  done
+  for a in 'terraform_data.server["alpha"]' 'terraform_data.server["gamma"]' 'terraform_data.room[0]' 'terraform_data.room[1]'; do
+    case "$(act "$a")" in no-op|none) ;; *) fail "the plan would touch $a, which nothing asked to change: it says $(act "$a")" ;; esac
+  done
+  out=$(go apply -auto-approve) || fail "tofu apply fails in campus after servers changed: $(echo "$out" | why)"
+  made_right
+  out=$(go plan -detailed-exitcode); code=$?
+  [ $code = 0 ] || fail "after apply a plan still wants to change something (exit status $code): the configuration does not settle"
+  out=$(go destroy -auto-approve) || fail "tofu destroy fails in campus: $(echo "$out" | why)"
+  [ "$(tofu show -json -no-color | jq '[.values.root_module.resources[]?] | length')" = 0 ] || fail "tofu destroy left resources in the state"
+
+  # The project with three mistakes, once they are fixed.
+  prepare fix
+  out=$(tofu plan -no-color -detailed-exitcode 2>&1); code=$?
+  if [ $code = 1 ]; then
+    case "$out" in *"No value for required variable"*) fail "tofu plan fails in fix with no value given, so every variable needs a default: $(echo "$out" | why)" ;; esac
+    fail "tofu plan fails in fix: $(echo "$out" | why)"
+  fi
+  out=$(tofu apply -no-color -input=false -auto-approve -var pods=7 2>&1) || fail "tofu apply fails in fix: $(echo "$out" | why)"
+  tofu show -json -no-color > $work/fix.json 2>/dev/null
+  [ "$(jq -r '[.values.root_module.resources[]? | select(.type == "terraform_data") | .name] | sort | join(",")' $work/fix.json)" = back,front,label ] || fail "fix must still have its three resources, front, back and label"
+  jq -e '[.values.root_module.resources[]? | .values.input != null] | all' $work/fix.json >/dev/null 2>&1 || fail "a resource in fix has no input"
+  jq -r '.values.outputs.report.value' $work/fix.json | grep -qE '^7 pods, label .+' || fail "the output report in fix should follow the variable pods: with pods set to 7 it says $(jq -r '.values.outputs.report.value' $work/fix.json)"
+  out=$(tofu plan -no-color -input=false -detailed-exitcode -var pods=7 2>&1); code=$?
+  [ $code = 0 ] || fail "after apply a plan in fix still wants to change something"
+  echo "PASSED: campus makes the servers and rooms its variables ask for, its plan changes only what was changed and settles after apply, and fix works"
